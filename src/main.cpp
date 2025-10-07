@@ -1,22 +1,19 @@
-#include "../include/Order.h"
-#include "../include/Trade.h"
+#include "../include/OrderBook.h"
 #include <iostream>
 
 int main() {
-    std::cout << "=== Simple Limit Order Book Skeleton ===" << std::endl;
+    std::cout << "=== Commit 2: OrderBook Interface Demo ===" << std::endl;
 
-    // Create a few orders manually
-    Order o1(1, Side::BUY, 100.5, 10);
-    Order o2(2, Side::SELL, 101.0, 5);
+    OrderBook book;
 
-    // Print them
-    o1.print();
-    o2.print();
+    // Add some buy and sell orders
+    book.addOrder(Side::BUY, 101.0, 10);
+    book.addOrder(Side::BUY, 100.5, 5);
+    book.addOrder(Side::SELL, 102.0, 7);
+    book.addOrder(Side::SELL, 103.0, 3);
 
-    // Create a trade between them
-    Trade t1(o1.id, o2.id, 100.75, 5);
-    t1.print();
+    // Print summary
+    book.printOrderBook();
 
-    std::cout << "=== End of test ===" << std::endl;
     return 0;
 }

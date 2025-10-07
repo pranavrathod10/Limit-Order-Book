@@ -16,3 +16,11 @@ A multithreaded trading engine simulation built from scratch.
 g++ -std=c++17 src/main.cpp -Iinclude -o lob_smoke
 ./lob_smoke
 ```
+
+## Commit 2 – OrderBook Interface
+
+**Highlights:**
+
+- Added `OrderBook` class to manage BUY/SELL orders.
+- Introduced thread-safe maps for order storage.
+- Demonstrated adding and printing orders.
