@@ -1,19 +1,22 @@
-#include "../include/OrderBook.h"
 #include <iostream>
+#include "OrderBook.h"
 
 int main() {
-    std::cout << "=== Commit 2: OrderBook Interface Demo ===" << std::endl;
+    OrderBook ob;
 
-    OrderBook book;
+    // Basic sequence: buyer then seller (full fill)
+    ob.addOrder(Order(1, Side::BUY, 100.0, 10));
+    ob.addOrder(Order(2, Side::SELL, 99.0, 10));
 
-    // Add some buy and sell orders
-    book.addOrder(Side::BUY, 101.0, 10);
-    book.addOrder(Side::BUY, 100.5, 5);
-    book.addOrder(Side::SELL, 102.0, 7);
-    book.addOrder(Side::SELL, 103.0, 3);
+    // Partial fill scenario
+    ob.addOrder(Order(3, Side::BUY, 101.0, 5));
+    ob.addOrder(Order(4, Side::SELL, 101.0, 3)); // matches 3 -> leftover BUY qty 2 at 101
 
-    // Print summary
-    book.printOrderBook();
+    // Market order example (price=0 => market)
+    ob.addOrder(Order(5, Side::SELL, 0.0, 4)); // will consume best bids until qty filled or book empty
+
+    ob.printTradeHistory();
+    ob.printOrderBook();
 
     return 0;
 }
