@@ -1,18 +1,34 @@
-#pragma once
-#include <chrono>
+#ifndef TRADE_H
+#define TRADE_H
+
+#include <iostream>
 
 /**
- * @struct Trade
- * @brief Represents a completed trade (a match between a buy and sell order).
+ * Trade represents a matched transaction between a buy and sell order.
  */
 struct Trade {
-    int buyId;              // ID of buyer's order
-    int sellId;             // ID of seller's order
-    double price;           // Executed trade price
-    int qty;                // Quantity traded
-    std::chrono::time_point<std::chrono::system_clock> timestamp;
+    int buyId;
+    int sellId;
+    double price;
+    int quantity;
+    long long timestamp;
 
-    Trade(int buyId_, int sellId_, double price_, int qty_)
-        : buyId(buyId_), sellId(sellId_), price(price_), qty(qty_),
-          timestamp(std::chrono::system_clock::now()) {}
+    Trade(int b, int s, double p, int q)
+        : buyId(b), sellId(s), price(p), quantity(q) 
+    {
+        timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()
+                    ).count();
+    }
+
+    void print() const {
+        std::cout << "Trade[BuyID=" << buyId
+                  << ", SellID=" << sellId
+                  << ", Price=" << price
+                  << ", Qty=" << quantity
+                  << ", Time=" << timestamp
+                  << "]" << std::endl;
+    }
 };
+
+#endif

@@ -1,32 +1,48 @@
-#pragma once
-#include <chrono>
+#ifndef ORDER_H
+#define ORDER_H
+
 #include <string>
+#include <chrono>
+#include <iostream>
 
 /**
- * @enum Side
- * @brief Defines whether an order is a BUY or SELL.
+ * Enum class for order side.
+ * Ensures type safety between BUY and SELL.
  */
-enum class Side { BUY, SELL };
+enum class Side {
+    BUY,
+    SELL
+};
 
 /**
- * @struct Order
- * @brief Represents a single order in the limit order book.
- *
- * Contains metadata like ID, side, price, quantity, and timestamp.
+ * Order represents a single buy or sell order.
  */
 struct Order {
     int id;                 // Unique order ID
     Side side;              // BUY or SELL
-    double price;           // Limit price (0 for market order)
-    int qty;                // Quantity to trade
-    std::chrono::time_point<std::chrono::system_clock> timestamp;  // For time-priority matching
+    double price;           // Price (0 for market orders)
+    int quantity;           // Quantity to trade
+    long long timestamp;    // Timestamp in microseconds
 
-    // ✅ Default constructor (needed for std::deque temporary initialization)
-    Order() : id(0), side(Side::BUY), price(0.0), qty(0),
-              timestamp(std::chrono::system_clock::now()) {}
+    // Constructor
+    Order(int id_, Side side_, double price_, int quantity_)
+        : id(id_), side(side_), price(price_), quantity(quantity_) 
+    {
+        timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()
+                    ).count();
+    }
 
-    // ✅ Parameterized constructor
-    Order(int id_, Side side_, double price_, int qty_)
-        : id(id_), side(side_), price(price_), qty(qty_),
-          timestamp(std::chrono::system_clock::now()) {}
+    // Print order info
+    void print() const {
+        std::string s = (side == Side::BUY) ? "BUY" : "SELL";
+        std::cout << "Order[ID=" << id
+                  << ", Side=" << s
+                  << ", Price=" << price
+                  << ", Qty=" << quantity
+                  << ", Time=" << timestamp
+                  << "]" << std::endl;
+    }
 };
+
+#endif
