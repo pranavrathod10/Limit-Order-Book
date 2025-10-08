@@ -1,173 +1,150 @@
 #include "OrderBook.h"
 #include <iostream>
 #include <algorithm>
-#include <chrono>
 
-//
-// Implementation notes:
-//
-// - matchOrder handles both BUY and SELL incoming orders.
-// - If incoming.price <= 0.0 we treat it as a MARKET order: consume book liquidity until filled or book exhausted.
-// - Trade price: we use the resting order's price (common, clear rule).
-// - indexMap maintains iterators so cancelOrder can remove an order in O(1).
-// - This file is single-threaded correct; Commit 2 will add thread-safety wrappers.
-//
+/**
+ * @brief Constructor — starts the background worker thread.
+ */
+OrderBook::OrderBook() {
+    worker = std::thread(&OrderBook::processOrders, this);
+}
 
-// Insert remaining portion of a limit order into the book (record indexMap)
-void OrderBook::insertResidual(Order &incoming) {
-    if (incoming.quantity <= 0) return;
+/**
+ * @brief Destructor — gracefully shuts down worker thread.
+ */
+OrderBook::~OrderBook() {
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        stopProcessing = true;
+    }
+    cv.notify_all();          // Wake the thread if it’s waiting
+    if (worker.joinable())    // Wait for it to finish
+        worker.join();
+}
 
-    if (incoming.side == Side::BUY) {
-        auto &lvl = buyBook[incoming.price];
-        lvl.push_back(incoming);
-        auto it = std::prev(lvl.end());
-        indexMap[incoming.id] = OrderLocation{Side::BUY, incoming.price, it};
-    } else {
-        auto &lvl = sellBook[incoming.price];
-        lvl.push_back(incoming);
-        auto it = std::prev(lvl.end());
-        indexMap[incoming.id] = OrderLocation{Side::SELL, incoming.price, it};
+/**
+ * @brief Submits an order asynchronously.
+ * Adds the order to the queue and notifies the background thread.
+ */
+void OrderBook::submitOrder(const Order& order) {
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        orderQueue.push_back(order);
+    }
+    cv.notify_one(); // Wake worker to process this order
+}
+
+/**
+ * @brief Worker thread function that continuously processes queued orders.
+ *
+ * Runs in a loop, waiting for new orders.
+ * Exits gracefully when `stopProcessing` is true AND queue is empty.
+ */
+void OrderBook::processOrders() {
+    while (true) {
+        Order order;
+
+        {
+            std::unique_lock<std::mutex> lock(mtx);
+
+            // Wait until new order arrives OR shutdown is requested
+            cv.wait(lock, [&]() { return !orderQueue.empty() || stopProcessing; });
+
+            // Stop condition — no more orders and shutdown flag set
+            if (stopProcessing && orderQueue.empty())
+                break;
+
+            // Retrieve next order
+            order = orderQueue.front();
+            orderQueue.pop_front();
+        }
+
+        // Process outside the lock to minimize contention
+        addOrder(order);
     }
 }
 
-// Core matching engine for a single incoming order (price-time priority)
-void OrderBook::matchOrder(Order incoming) {
-    bool isMarket = incoming.price <= 0.0;
+/**
+ * @brief Synchronously add an order to the book and try to match it.
+ *
+ * - For BUY orders: match against best (lowest) asks.
+ * - For SELL orders: match against best (highest) bids.
+ */
+void OrderBook::addOrder(const Order& order) {
+    std::lock_guard<std::mutex> lock(mtx);  // Prevent concurrent book modification
 
-    if (incoming.side == Side::BUY) {
-        // Try to match with lowest asks first
-        while (incoming.quantity > 0 && !sellBook.empty()) {
-            auto bestIt = sellBook.begin(); // lowest ask
-            double bestPrice = bestIt->first;
+    if (order.side == Side::BUY) {
+        // Try to match with best ask (lowest sell price)
+        while (!asks.empty() && order.price >= asks.begin()->first && order.qty > 0) {
+            auto& bestAskQueue = asks.begin()->second;
+            Order& bestAsk = bestAskQueue.front();
 
-            // Stop if incoming is limit and best ask > limit price
-            if (!isMarket && bestPrice > incoming.price) break;
+            int tradedQty = std::min(order.qty, bestAsk.qty);
+            tradeHistory.emplace_back(order.id, bestAsk.id, bestAsk.price, tradedQty);
 
-            auto &queue = bestIt->second;
-            // match against orders at this price level FIFO
-            while (incoming.quantity > 0 && !queue.empty()) {
-                Order &resting = queue.front();
-                int traded = std::min(incoming.quantity, resting.quantity);
+            // Update remaining quantities
+            bestAsk.qty -= tradedQty;
+            const_cast<Order&>(order).qty -= tradedQty;
 
-                // Record trade: buyId = incoming.id, sellId = resting.id
-                tradeHistory.emplace_back(incoming.id, resting.id, resting.price, traded);
-                // update timestamp of trade to now (Trade constructor does this)
-
-                incoming.quantity -= traded;
-                resting.quantity -= traded;
-
-                if (resting.quantity == 0) {
-                    // remove resting order and its index entry
-                    indexMap.erase(resting.id);
-                    queue.pop_front();
-                }
-            }
-
-            // if level empty remove price level
-            if (queue.empty()) sellBook.erase(bestIt);
+            // Remove exhausted orders
+            if (bestAsk.qty == 0)
+                bestAskQueue.pop_front();
+            if (bestAskQueue.empty())
+                asks.erase(asks.begin());
         }
 
-        // leftover for limit orders goes to book; market leftover is discarded
-        if (incoming.quantity > 0 && !isMarket) insertResidual(incoming);
-    } else { // SELL incoming
-        while (incoming.quantity > 0 && !buyBook.empty()) {
-            auto bestIt = buyBook.begin(); // highest bid
-            double bestPrice = bestIt->first;
+        // If still quantity left unmatched, add to bid book
+        if (order.qty > 0)
+            bids[order.price].push_back(order);
+    }
+    else { // SELL order
+        while (!bids.empty() && order.price <= bids.begin()->first && order.qty > 0) {
+            auto& bestBidQueue = bids.begin()->second;
+            Order& bestBid = bestBidQueue.front();
 
-            if (!isMarket && bestPrice < incoming.price) break;
+            int tradedQty = std::min(order.qty, bestBid.qty);
+            tradeHistory.emplace_back(bestBid.id, order.id, bestBid.price, tradedQty);
 
-            auto &queue = bestIt->second;
-            while (incoming.quantity > 0 && !queue.empty()) {
-                Order &resting = queue.front();
-                int traded = std::min(incoming.quantity, resting.quantity);
+            bestBid.qty -= tradedQty;
+            const_cast<Order&>(order).qty -= tradedQty;
 
-                tradeHistory.emplace_back(resting.id, incoming.id, resting.price, traded);
-
-                incoming.quantity -= traded;
-                resting.quantity -= traded;
-
-                if (resting.quantity == 0) {
-                    indexMap.erase(resting.id);
-                    queue.pop_front();
-                }
-            }
-
-            if (queue.empty()) buyBook.erase(bestIt);
+            if (bestBid.qty == 0)
+                bestBidQueue.pop_front();
+            if (bestBidQueue.empty())
+                bids.erase(bids.begin());
         }
 
-        if (incoming.quantity > 0 && !isMarket) insertResidual(incoming);
+        if (order.qty > 0)
+            asks[order.price].push_back(order);
     }
 }
 
-// Public API: add order (single-threaded)
-void OrderBook::addOrder(const Order &order) {
-    // copy because we will modify quantity
-    Order incoming = order;
-
-    // If the order id was already in the book (duplicate), we reject by ignoring.
-    if (indexMap.find(incoming.id) != indexMap.end()) {
-        std::cerr << "addOrder: duplicate order id " << incoming.id << " — ignoring\n";
+/**
+ * @brief Print all executed trades so far.
+ */
+void OrderBook::printTradeHistory() const {
+    std::cout << "\n--- Trade History ---\n";
+    if (tradeHistory.empty()) {
+        std::cout << "(no trades executed)\n";
         return;
     }
 
-    // Matching happens before adding to resting book
-    matchOrder(incoming);
+    for (const auto& t : tradeHistory)
+        std::cout << "Buy " << t.buyId << " - Sell " << t.sellId
+                  << " @ " << t.price << " x " << t.qty << "\n";
 }
 
-// Cancel an existing resting order (returns true if removed)
-bool OrderBook::cancelOrder(int orderId) {
-    auto it = indexMap.find(orderId);
-    if (it == indexMap.end()) return false;
-
-    OrderLocation loc = it->second;
-    if (loc.side == Side::BUY) {
-        auto lvlIt = buyBook.find(loc.price);
-        if (lvlIt != buyBook.end()) {
-            lvlIt->second.erase(loc.it);            // O(1) with list
-            if (lvlIt->second.empty()) buyBook.erase(lvlIt);
-        }
-    } else {
-        auto lvlIt = sellBook.find(loc.price);
-        if (lvlIt != sellBook.end()) {
-            lvlIt->second.erase(loc.it);
-            if (lvlIt->second.empty()) sellBook.erase(lvlIt);
-        }
-    }
-    indexMap.erase(it);
-    return true;
-}
-
-// Print book snapshot
+/**
+ * @brief Print current order book snapshot.
+ */
 void OrderBook::printOrderBook() const {
-    std::cout << "\n=== ORDER BOOK SNAPSHOT ===\n";
+    std::cout << "\n--- Order Book Snapshot ---\n";
 
-    std::cout << "ASKS (sell side, low->high):\n";
-    for (const auto &lvl : sellBook) {
-        int total = 0;
-        for (const auto &o : lvl.second) total += o.quantity;
-        std::cout << "  " << lvl.first << " : " << total << '\n';
-        for (const auto &o : lvl.second) {
-            std::cout << "    ";
-            o.print();
-        }
-    }
+    std::cout << "Bids (BUY):\n";
+    for (const auto& [price, queue] : bids)
+        std::cout << "  " << price << " => " << queue.size() << " orders\n";
 
-    std::cout << "BIDS (buy side, high->low):\n";
-    for (const auto &lvl : buyBook) {
-        int total = 0;
-        for (const auto &o : lvl.second) total += o.quantity;
-        std::cout << "  " << lvl.first << " : " << total << '\n';
-        for (const auto &o : lvl.second) {
-            std::cout << "    ";
-            o.print();
-        }
-    }
-    std::cout << "===========================\n";
-}
-
-// Print trade history
-void OrderBook::printTradeHistory() const {
-    std::cout << "\n=== TRADE HISTORY (" << tradeHistory.size() << ") ===\n";
-    for (const auto &t : tradeHistory) t.print();
-    std::cout << "=================================\n";
+    std::cout << "Asks (SELL):\n";
+    for (const auto& [price, queue] : asks)
+        std::cout << "  " << price << " => " << queue.size() << " orders\n";
 }

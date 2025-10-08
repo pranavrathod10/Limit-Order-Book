@@ -1,65 +1,60 @@
 #pragma once
 #include <map>
-#include <list>
-#include <unordered_map>
+#include <deque>
 #include <vector>
 #include <mutex>
-
+#include <thread>
+#include <condition_variable>
 #include "Order.h"
 #include "Trade.h"
 
-/*
-  OrderBook - single-symbol limit order book (single-threaded core)
-
-  Design highlights:
-  - Per-price level storage: std::map<price, std::list<Order>>
-    * buyBook: std::greater<double> -> highest bid first
-    * sellBook: default (std::less) -> lowest ask first
-  - Use std::list for orders at a price level to get:
-    * O(1) pop_front (FIFO behavior)
-    * stable iterators so we can cancel orders in O(1)
-  - indexMap: unordered_map<orderId -> (side, price, iterator)> for O(1) cancel
-  - matchOrder logic implements price-time priority and partial fills
-  - tradeHistory: vector<Trade> to record executed trades
-*/
-
+/**
+ * @class OrderBook
+ * @brief Thread-safe, concurrent limit order book implementation.
+ *
+ * Supports asynchronous order submission using a background worker thread.
+ * Uses mutexes and condition variables to synchronize access between threads.
+ */
 class OrderBook {
-public:
-    OrderBook() = default;
-    ~OrderBook() = default;
-
-    // Public API (single-threaded)
-    // Add an order (limit or market — market represented with price <= 0)
-    void addOrder(const Order &order);
-
-    // Cancel an order by ID. Returns true if removed from book (not matched).
-    bool cancelOrder(int orderId);
-
-    // Snapshot printers (const — do not modify state)
-    void printOrderBook() const;
-    void printTradeHistory() const;
-
 private:
-    // types for convenience
-    using OrderList = std::list<Order>;
+    // --- Core order book data structures ---
+    // Each price level maps to a deque (queue) of orders at that price.
+    // Bids are sorted in descending order (highest price first).
+    // Asks are sorted in ascending order (lowest price first).
+    std::map<double, std::deque<Order>, std::greater<double>> bids;
+    std::map<double, std::deque<Order>> asks;
 
-    struct OrderLocation {
-        Side side;
-        double price;
-        OrderList::iterator it;
-    };
-
-    // Books: price -> list of orders at that price
-    std::map<double, OrderList, std::greater<double>> buyBook; // highest -> lowest
-    std::map<double, OrderList> sellBook;                      // lowest -> highest
-
-    // index: orderId -> location in book (for O(1) cancel)
-    std::unordered_map<int, OrderLocation> indexMap;
-
-    // trade history
+    // List of completed trades for recordkeeping
     std::vector<Trade> tradeHistory;
 
-    // Internal helpers (operate on copies or called with proper locking in multithreaded commit)
-    void matchOrder(Order incoming);        // consumes as much as possible and records trades
-    void insertResidual(Order &incoming);   // inserts leftover limit order into appropriate book
+    // --- Concurrency & threading members ---
+    std::deque<Order> orderQueue;           // Orders waiting to be processed
+    std::mutex mtx;                         // Protects shared state
+    std::condition_variable cv;             // Signals when new orders arrive
+    bool stopProcessing = false;            // Used to gracefully stop the worker
+    std::thread worker;                     // Dedicated background thread
+
+    // --- Internal helper functions ---
+    void processOrders();                   // Worker thread main loop
+    void matchOrders();                     // (Optional future use)
+    
+public:
+    OrderBook();
+    ~OrderBook();
+
+    /**
+     * @brief Public API — submit an order asynchronously.
+     * The order is queued and processed by a worker thread.
+     */
+    void submitOrder(const Order& order);
+
+    /**
+     * @brief Synchronously add an order (core matching logic).
+     * Called internally by worker after pulling from queue.
+     */
+    void addOrder(const Order& order);
+
+    // Display current book and trades
+    void printOrderBook() const;
+    void printTradeHistory() const;
 };
